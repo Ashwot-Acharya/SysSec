@@ -21,7 +21,7 @@ const Register = () => {
     try {
       await register(name, email, password);
       // Registration successful, navigate to login
-      navigate('/login');
+      navigate('/');
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to register');
     } finally {
@@ -89,7 +89,7 @@ const Register = () => {
 
         <p className="mt-6 text-center text-sm text-gray-600">
           Already have an account?{' '}
-          <Link to="/login" className="font-medium text-blue-600 hover:text-blue-500">
+          <Link to="/" className="font-medium text-blue-600 hover:text-blue-500">
             Sign in
           </Link>
         </p>
