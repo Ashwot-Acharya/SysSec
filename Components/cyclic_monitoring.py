@@ -179,11 +179,14 @@ def report_anomaly(cycle, pid, batch, score, explanation, api_url):
             "score": score, "sequence": batch,
             "explanation": explanation if isinstance(explanation, dict) else {"verdict": explanation},
         }
-        print(f"  [API] POSTing Anomaly → {api_url}")
-        try:
-            requests.post(f"{api_url}/anomaly", json=event, timeout=2.0)
-        except Exception as e:
-            print(f"  [API] POST failed: {e}")
+        # We no longer POST to /anomaly because the backend Server (syscall_anomaly_server.py)
+        # receives the raw syscalls via post_raw_syscalls() and does its own Anomaly Detection
+        # and WebSocket broadcasting. Posting here would cause duplicate alerts.
+        # print(f"  [API] POSTing Anomaly → {api_url}")
+        # try:
+        #     requests.post(f"{api_url}/anomaly", json=event, timeout=2.0)
+        # except Exception as e:
+        #     print(f"  [API] POST failed: {e}")
 
 def post_raw_syscalls(batch: list[str], pid: str, api_url: str):
     """Post raw syscalls to the backend so the dashboard feed updates."""
@@ -208,9 +211,11 @@ def post_raw_syscalls(batch: list[str], pid: str, api_url: str):
         base = api_url.rstrip('/')
         # If the user passed the whole path /api/syscalls/batch, don't append
         url = base if base.endswith('/batch') else f"{base}/api/syscalls/batch"
-        requests.post(url, json={"syscalls": payload}, timeout=1.0)
-    except Exception:
-        pass  # Don't slow down monitoring if backend is offline
+        resp = requests.post(url, json={"syscalls": payload}, timeout=1.0)
+        if resp.status_code != 200:
+            print(f"  [API] POST {url} returned {resp.status_code}: {resp.text[:100]}")
+    except Exception as e:
+        print(f"  [API] POST failed: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -283,6 +288,10 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                     print(f"  ✓ First syscall captured: {syscall!r}")
 
                 batch.append(syscall)
+                
+                # Instantly post this raw syscall to feed the live dashboard
+                if api_url:
+                    post_raw_syscalls([syscall], pid, api_url)
 
                 # ── Cycle boundary: idle syscall seen ─────────────────────
                 if syscall in IDLE_SYSCALLS:
@@ -308,10 +317,6 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                         total_anomalies += 1
                         report_anomaly(cycle, pid, cycle_syscalls,
                                        score, explanation, api_url)
-                    
-                    # Also POST the raw sequence to feed the dashboard
-                    if api_url:
-                        post_raw_syscalls(cycle_syscalls, pid, api_url)
 
             if proc.poll() is not None:
                 print(f"\n  Process exited (code {proc.returncode}).")

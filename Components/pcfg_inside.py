@@ -464,11 +464,24 @@ class InsideAlgorithm:
             token_parseable.append(covered)
 
         parse_map = {}
+        parse_spans = []
         for i in range(n):
             for j in range(i, n):
                 covered = any(table.get((i, j, nt), 0) > 0
                               for nt in self.cnf.non_terminals)
                 parse_map[(i, j)] = covered
+                
+                # Generate visual spans for valid sequences of length > 1
+                if covered and j > i and (j - i) <= 4:
+                    label = " → ".join(sequence[i:j+1])
+                    if len(label) > 40:
+                        label = label[:37] + "..."
+                    parse_spans.append({
+                        "start": i,
+                        "end": j,
+                        "label": label,
+                        "valid": True
+                    })
 
         breakdown_idx  = None
         breakdown_info = None
@@ -519,6 +532,7 @@ class InsideAlgorithm:
             "length":           n,
             "token_parseable":  token_parseable,
             "parse_map":        {f"{i},{j}": v for (i, j), v in parse_map.items()},
+            "parse_spans":      parse_spans,
             "breakdown":        breakdown_info,
             "unknown_syscalls": unknown,
             "full_parse_prob":  p,
