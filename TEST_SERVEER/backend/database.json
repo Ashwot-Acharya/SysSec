@@ -6,6 +6,20 @@
       "email": "kshitizkhanal123@gmail.com",
       "password": "$2b$10$DLYrjTZErMifWfbac64sPuDzsTJgVHc0rPQy3V9DyjpUzIaez/Sai",
       "createdAt": "2026-04-25T08:57:46.127Z"
+    },
+    {
+      "id": "d14f480d-e968-40e1-9c6c-704d6b47f9c3",
+      "name": "ashwot",
+      "email": "ashshwo11@gmail.com",
+      "password": "$2b$10$6e3Af73u/948hUypxmgpKePcJixSukm1oj8FuLJUSDqRbRcUe/mI6",
+      "createdAt": "2026-04-25T10:41:37.084Z"
+    },
+    {
+      "id": "d5e8f7f1-c46d-4b8d-b898-5d51ee1ec401",
+      "name": "ashwot",
+      "email": "ashwot@gmail.com",
+      "password": "$2b$10$LgaEojwMoYwPrxgpw7Gxd.aKTcH34/S.8LymvInYQe3PNA9UfTn16",
+      "createdAt": "2026-04-25T12:27:52.951Z"
     }
   ],
   "files": [
