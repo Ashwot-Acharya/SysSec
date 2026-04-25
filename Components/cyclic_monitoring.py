@@ -29,11 +29,9 @@ import argparse
 import threading
 import datetime
 import json
+import requests
 from collections import defaultdict
 from typing import Optional
-
-# Optional: uncomment when backend is ready
-# import requests
 
 
 # ── Idle syscalls (same set as collect_traces.py) ────────────────────────────
@@ -181,14 +179,45 @@ def report_anomaly(cycle, pid, batch, score, explanation, api_url):
             "score": score, "sequence": batch,
             "explanation": explanation if isinstance(explanation, dict) else {"verdict": explanation},
         }
-        print(f"  [API] Would POST → {api_url}")
+        print(f"  [API] POSTing Anomaly → {api_url}")
+        try:
+            requests.post(f"{api_url}/anomaly", json=event, timeout=2.0)
+        except Exception as e:
+            print(f"  [API] POST failed: {e}")
+
+def post_raw_syscalls(batch: list[str], pid: str, api_url: str):
+    """Post raw syscalls to the backend so the dashboard feed updates."""
+    if not api_url:
+        return
+    
+    # The backend expects /api/syscalls/batch with specific fields
+    payload = []
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    for syscall in batch:
+        payload.append({
+            "timestamp": ts,
+            "thread": "T1",
+            "pid": int(pid) if pid.isdigit() else 0,
+            "syscall": syscall,
+            "args": "",
+            "return_value": 0
+        })
+    
+    try:
+        # Strip trailing slash if present and append the batch path
+        base = api_url.rstrip('/')
+        # If the user passed the whole path /api/syscalls/batch, don't append
+        url = base if base.endswith('/batch') else f"{base}/api/syscalls/batch"
+        requests.post(url, json={"syscalls": payload}, timeout=1.0)
+    except Exception:
+        pass  # Don't slow down monitoring if backend is offline
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MONITOR LOOP
 # ═════════════════════════════════════════════════════════════════════════════
 
-def monitor(pid: str, detector, threshold: float,
+def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
             use_strace: bool, api_url: Optional[str],
             debug: bool) -> None:
     """
@@ -199,10 +228,16 @@ def monitor(pid: str, detector, threshold: float,
     """
     import subprocess
 
-    if use_strace:
-        cmd = ["sudo", "strace", "-f", "-e", "trace=all", "-p", pid]
+    if cmd_to_run:
+        if use_strace:
+            cmd = ["sudo", "strace", "-f", "-e", "trace=all"] + cmd_to_run.split()
+        else:
+            cmd = ["sudo", "stdbuf", "-oL", "-eL", "perf", "trace"] + cmd_to_run.split()
     else:
-        cmd = ["sudo", "stdbuf", "-oL", "-eL", "perf", "trace", "-p", pid]
+        if use_strace:
+            cmd = ["sudo", "strace", "-f", "-e", "trace=all", "-p", pid]
+        else:
+            cmd = ["sudo", "stdbuf", "-oL", "-eL", "perf", "trace", "-p", pid]
 
     print(f"  Command : {' '.join(cmd)}")
     print(f"  Batching on idle syscalls: {', '.join(sorted(IDLE_SYSCALLS))}")
@@ -263,7 +298,7 @@ def monitor(pid: str, detector, threshold: float,
 
                     ts = datetime.datetime.now().strftime("%H:%M:%S")
                     score_str = f"{score:.4f}" if score < 999 else "∞"
-                    flag = "⚠️  ANOMALY" if is_anom else "✓  normal "
+                    flag = " ANOMALY" if is_anom else "✓ normal "
 
                     print(f"  [{ts}] Cycle {cycle:>4} | "
                           f"{len(cycle_syscalls):>3} syscalls | "
@@ -273,6 +308,10 @@ def monitor(pid: str, detector, threshold: float,
                         total_anomalies += 1
                         report_anomaly(cycle, pid, cycle_syscalls,
                                        score, explanation, api_url)
+                    
+                    # Also POST the raw sequence to feed the dashboard
+                    if api_url:
+                        post_raw_syscalls(cycle_syscalls, pid, api_url)
 
             if proc.poll() is not None:
                 print(f"\n  Process exited (code {proc.returncode}).")
@@ -327,8 +366,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    p.add_argument("--pid",      type=str, required=True,
+    p.add_argument("--pid",      type=str, default="",
                    help="PID of the process to monitor")
+    p.add_argument("--cmd",      type=str, default="",
+                   help="Command to run and monitor (e.g. 'ping 8.8.8.8')")
     p.add_argument("--model",    type=str, required=True,
                    help="Path to model.pkl (from train.py)")
     p.add_argument("--strace",   action="store_true",
@@ -339,10 +380,15 @@ def main():
                    help="Print every raw line from the tracer")
     args = p.parse_args()
 
+    if not args.pid and not args.cmd:
+        print("Error: Must provide either --pid or --cmd")
+        sys.exit(1)
+
     print(f"\n{'═'*60}")
     print(f"  CFG-IDS LIVE MONITOR")
     print(f"{'═'*60}")
-    print(f"  PID   : {args.pid}")
+    print(f"  PID   : {args.pid or 'N/A'}")
+    print(f"  CMD   : {args.cmd or 'N/A'}")
     print(f"  Model : {args.model}")
     print(f"  Tracer: {'strace' if args.strace else 'perf trace'}")
     if args.send_api:
@@ -369,6 +415,7 @@ def main():
     # ── Start monitoring ──────────────────────────────────────────────────────
     monitor(
         pid       = args.pid,
+        cmd_to_run= args.cmd,
         detector  = detector,
         threshold = threshold,
         use_strace= args.strace,

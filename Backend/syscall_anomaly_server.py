@@ -25,6 +25,17 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).parent.parent))
+try:
+    from Components.cyclic_monitoring import load_model
+    MODEL_AVAILABLE = True
+except ImportError:
+    MODEL_AVAILABLE = False
+    print("Warning: Could not import load_model from Components.cyclic_monitoring")
+
 # ─────────────────────────────────────────────
 #  Logging
 # ─────────────────────────────────────────────
@@ -65,6 +76,12 @@ class AnomalyResult:
     score: float               # 0.0 - 1.0 confidence score
     reason: Optional[str]      # human-readable explanation
     expected_tokens: list[str] # what was expected instead
+    # Parse tree fields for frontend visualization
+    token_parseable: list[bool] = None       # per-token: True = valid, False = anomalous
+    breakdown: Optional[dict]  = None        # {position, syscall, reason, rule_violated}
+    verdict: Optional[str]     = None        # one-line human-readable summary
+    unknown_syscalls: list[str] = None       # syscalls never seen before
+    parse_spans: list[dict]    = None        # [{start, end, label, valid}] for tree rendering
 
 
 # ─────────────────────────────────────────────
@@ -128,13 +145,98 @@ state = ServerState()
 # ─────────────────────────────────────────────
 #  Anomaly Detection  (pluggable stub)
 # ─────────────────────────────────────────────
+# Known "normal" syscall patterns — used for parse tree generation
+NORMAL_PATTERNS = {
+    ("openat", "read"): "file_read_start",
+    ("read", "close"): "file_read_end",
+    ("read", "read"): "sequential_read",
+    ("openat", "write"): "file_write_start",
+    ("write", "close"): "file_write_end",
+    ("recvfrom", "openat"): "request_handling",
+    ("sendto", "close"): "response_complete",
+    ("close", "recvfrom"): "connection_cycle",
+    ("read", "sendto"): "read_then_respond",
+}
+
+
 class AnomalyDetector:
     """
-    Mock anomaly detector using simple rules.
+    Anomaly detector wrapper.
 
-    To integrate a real ML model later, just replace the `detect()` method.
-    The interface stays the same: list[str] → AnomalyResult.
+    Tries to load the actual PCFG model from Components/model.pkl.
+    If not found, falls back to the dummy rule-based detector.
     """
+
+    def __init__(self):
+        self.actual_model = None
+        self.threshold = 0.7
+        self.is_dummy = True
+
+        if MODEL_AVAILABLE:
+            model_path = Path(__file__).parent.parent / "Components" / "model.pkl"
+            try:
+                payload = load_model(str(model_path))
+                self.actual_model = payload["detector"]
+                self.threshold = payload["threshold"]
+                self.is_dummy = False
+                log.info(f"Successfully loaded actual PCFG model from {model_path} with threshold {self.threshold:.4f}")
+            except Exception as e:
+                log.warning(f"Failed to load actual model: {e}. Falling back to dummy detector.")
+        
+        # We override the global ANOMALY_THRESHOLD if the real model provides one
+        global ANOMALY_THRESHOLD
+        if not self.is_dummy:
+            ANOMALY_THRESHOLD = self.threshold
+
+    def _build_parse_tree(self, window: list[str], failed_pos: int,
+                          reason: str, rule_name: str) -> tuple:
+        """
+        Build parse tree data for a window of syscalls.
+
+        Returns (token_parseable, breakdown, verdict, parse_spans).
+        """
+        n = len(window)
+
+        # Token-level parseability: mark tokens near the anomaly as unparseable
+        token_parseable = [True] * n
+        if failed_pos is not None and 0 <= failed_pos < n:
+            token_parseable[failed_pos] = False
+            # Also mark the token before as part of the violation pair
+            if failed_pos > 0:
+                token_parseable[failed_pos - 1] = False
+
+        # Breakdown info
+        breakdown = {
+            "position": failed_pos,
+            "syscall": window[failed_pos] if 0 <= failed_pos < n else "?",
+            "reason": reason,
+            "rule_violated": rule_name,
+            "context_before": window[max(0, failed_pos - 3):failed_pos],
+            "context_after": window[failed_pos + 1:min(n, failed_pos + 3)],
+        }
+
+        # Build parse spans — identify which consecutive pairs match known patterns
+        parse_spans = []
+        for i in range(n - 1):
+            pair = (window[i], window[i + 1])
+            if pair in NORMAL_PATTERNS:
+                parse_spans.append({
+                    "start": i,
+                    "end": i + 1,
+                    "label": NORMAL_PATTERNS[pair],
+                    "valid": token_parseable[i] and token_parseable[i + 1],
+                })
+
+        # Verdict
+        parseable_count = sum(token_parseable)
+        verdict = (
+            f"RULE VIOLATION at position {failed_pos}: "
+            f"'{window[failed_pos] if failed_pos < n else '?'}' "
+            f"violates {rule_name}. "
+            f"{parseable_count}/{n} tokens match normal grammar patterns."
+        )
+
+        return token_parseable, breakdown, verdict, parse_spans
 
     def detect(self, window: list[str]) -> AnomalyResult:
         """Analyze the sliding window of syscall names for anomalies.
@@ -142,19 +244,59 @@ class AnomalyDetector:
         Rules:
             1. Double close — two consecutive 'close' calls
             2. Too many opens — more than 2 'openat' without matching 'close'
+
+        Returns AnomalyResult with full parse tree data for visualization.
         """
         if not window:
             return AnomalyResult(False, 0.1, None, [])
 
+        if not self.is_dummy and self.actual_model is not None:
+            # Use the ACTUAL PCFG inside model!
+            # The model predict() takes a sequence and returns (is_anomaly, score, explanation_dict)
+            is_anom, score, explanation = self.actual_model.predict(window)
+            
+            # extract parse tree details provided by explain_with_parse_tree
+            token_parseable = explanation.get("token_parseable")
+            breakdown = explanation.get("breakdown")
+            verdict = explanation.get("verdict", str(explanation))
+            unknown_syscalls = explanation.get("unknown_syscalls", [])
+            parse_spans = explanation.get("parse_spans", [])
+
+            return AnomalyResult(
+                is_anomaly=is_anom,
+                score=score,
+                reason=breakdown.get("reason") if breakdown else "Anomalous sequence detected by PCFG model",
+                expected_tokens=[], # Model doesn't predict specific next tokens natively yet
+                token_parseable=token_parseable,
+                breakdown=breakdown,
+                verdict=verdict,
+                unknown_syscalls=unknown_syscalls,
+                parse_spans=parse_spans,
+            )
+
+        # ── Fallback Dummy Rules ──────────────────────────────────────────────
+        n = len(window)
         current = window[-1]
 
         # Rule 1 — double close
-        if current == "close" and len(window) >= 2 and window[-2] == "close":
+        if current == "close" and n >= 2 and window[-2] == "close":
+            failed_pos = n - 1
+            reason = "Double close without open in between"
+            rule_name = "fd_lifecycle (open → read/write → close)"
+
+            token_parseable, breakdown, verdict, parse_spans = \
+                self._build_parse_tree(window, failed_pos, reason, rule_name)
+
             return AnomalyResult(
                 is_anomaly=True,
                 score=0.85,
-                reason="Double close without open in between",
+                reason=reason,
                 expected_tokens=["openat", "read", "write"],
+                token_parseable=token_parseable,
+                breakdown=breakdown,
+                verdict=verdict,
+                unknown_syscalls=[],
+                parse_spans=parse_spans,
             )
 
         # Rule 2 — too many openat without close
@@ -162,11 +304,23 @@ class AnomalyDetector:
             opens = window.count("openat")
             closes = window.count("close")
             if opens - closes > 2:
+                failed_pos = n - 1
+                reason = f"Too many open files without close (opens={opens}, closes={closes})"
+                rule_name = "fd_balance (each open must have a close)"
+
+                token_parseable, breakdown, verdict, parse_spans = \
+                    self._build_parse_tree(window, failed_pos, reason, rule_name)
+
                 return AnomalyResult(
                     is_anomaly=True,
                     score=0.92,
-                    reason="Too many open files without close",
+                    reason=reason,
                     expected_tokens=["close"],
+                    token_parseable=token_parseable,
+                    breakdown=breakdown,
+                    verdict=verdict,
+                    unknown_syscalls=[],
+                    parse_spans=parse_spans,
                 )
 
         return AnomalyResult(False, 0.1, None, [])
@@ -279,6 +433,14 @@ async def processor_task() -> None:
                     "failure_reason": result.reason,
                     "failed_at_position": failed_pos,
                     "expected_tokens": result.expected_tokens,
+                    # Parse tree data for frontend visualization
+                    "parse_tree": {
+                        "token_parseable": result.token_parseable or [True] * len(window_snapshot),
+                        "breakdown": result.breakdown,
+                        "verdict": result.verdict,
+                        "unknown_syscalls": result.unknown_syscalls or [],
+                        "parse_spans": result.parse_spans or [],
+                    },
                 }
                 await broadcast_to_clients(anomaly_msg)
                 log.warning(

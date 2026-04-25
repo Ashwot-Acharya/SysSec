@@ -31,6 +31,12 @@ SAMPLE_DATA = [
     {"timestamp": "12794.654", "thread": "Thread-2", "pid": 167630, "syscall": "close", "args": "fd: 5", "return_value": 0},
     {"timestamp": "12794.887", "thread": "Thread-2", "pid": 167630, "syscall": "sendto", "args": "fd: 4", "return_value": 185},
     {"timestamp": "12794.963", "thread": "Thread-2", "pid": 167630, "syscall": "close", "args": "fd: 4", "return_value": 0},
+    
+    # --- Anomalous Sequence to test Parse Tree ---
+    {"timestamp": "12800.001", "thread": "Thread-3", "pid": 199999, "syscall": "execve", "args": "filename: /bin/sh", "return_value": 0},
+    {"timestamp": "12800.010", "thread": "Thread-3", "pid": 199999, "syscall": "mprotect", "args": "addr: 0xdeadbeef", "return_value": 0},
+    {"timestamp": "12800.015", "thread": "Thread-3", "pid": 199999, "syscall": "close", "args": "fd: 99", "return_value": -1},
+    {"timestamp": "12800.020", "thread": "Thread-3", "pid": 199999, "syscall": "close", "args": "fd: 100", "return_value": -1},
 ]
 
 
