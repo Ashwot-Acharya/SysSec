@@ -20,6 +20,20 @@
       "email": "ashwot@gmail.com",
       "password": "$2b$10$LgaEojwMoYwPrxgpw7Gxd.aKTcH34/S.8LymvInYQe3PNA9UfTn16",
       "createdAt": "2026-04-25T12:27:52.951Z"
+    },
+    {
+      "id": "e7477a16-f828-4933-8c56-f25d52df76bd",
+      "name": "hehe",
+      "email": "ashwot1@gmail.com",
+      "password": "$2b$10$lHA.4qNpM2XIjN.3UNnUZuT1BWTbjBU.QrxRTrqslIpsCTeaGILwS",
+      "createdAt": "2026-04-25T15:04:12.993Z"
+    },
+    {
+      "id": "eb456f9a-2f8e-4239-ae34-d1e52fffde49",
+      "name": "ashwot1",
+      "email": "ashwot2@gmail.com",
+      "password": "$2b$10$wmhX9p14GfO3w4uuV9Ent.9s5PKX2UFBKSIiNapIuU.cLZ706gOau",
+      "createdAt": "2026-04-25T15:05:33.320Z"
     }
   ],
   "files": [
@@ -52,6 +66,16 @@
       "size": 122129,
       "mimetype": "image/png",
       "createdAt": "2026-04-25T08:58:37.761Z"
+    },
+    {
+      "id": "b4abb7f0-1717-4ac8-8ad6-61394fea0465",
+      "userId": "e7477a16-f828-4933-8c56-f25d52df76bd",
+      "originalName": "_MG_8467.JPG",
+      "fileName": "1777129487198-997400933.JPG",
+      "path": "uploads/1777129487198-997400933.JPG",
+      "size": 849307,
+      "mimetype": "image/jpeg",
+      "createdAt": "2026-04-25T15:04:47.202Z"
     }
   ]
 }
