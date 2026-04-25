@@ -34,6 +34,13 @@
       "email": "ashwot2@gmail.com",
       "password": "$2b$10$wmhX9p14GfO3w4uuV9Ent.9s5PKX2UFBKSIiNapIuU.cLZ706gOau",
       "createdAt": "2026-04-25T15:05:33.320Z"
+    },
+    {
+      "id": "e92f1dec-42e4-4f7b-92b5-77d309b75195",
+      "name": "adjfa",
+      "email": "ashshwodafsd11@gmail.com",
+      "password": "$2b$10$cTW2ieQ2e9XnnPoTG1JpnOL3s2mISUuJANY2TkVhWcQvvLBNiITX2",
+      "createdAt": "2026-04-25T15:56:29.042Z"
     }
   ],
   "files": [
