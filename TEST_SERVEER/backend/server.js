@@ -19,12 +19,6 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir);
 }
 
-// Ensure database file exists
-const dbFile = path.join(__dirname, 'database.json');
-if (!fs.existsSync(dbFile)) {
-  fs.writeFileSync(dbFile, JSON.stringify({ users: [], files: [] }, null, 2));
-}
-
 // Routes
 app.use('/auth', authRoutes);
 app.use('/files', fileRoutes);
@@ -34,4 +28,5 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Database: SQLite (database.sqlite)`);
 });

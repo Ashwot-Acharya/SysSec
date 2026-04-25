@@ -47,7 +47,7 @@ const Upload = () => {
           setProgress(percentCompleted);
         },
       });
-      navigate('/');
+      navigate('/dashboard');
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to upload file');
       setLoading(false);
@@ -65,7 +65,7 @@ const Upload = () => {
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <div className="flex items-center gap-4 mb-8">
-        <Link to="/" className="p-2 hover:bg-gray-200 rounded-full transition-colors">
+        <Link to="/dashboard" className="p-2 hover:bg-gray-200 rounded-full transition-colors">
           <ArrowLeft className="w-5 h-5 text-gray-600" />
         </Link>
         <h1 className="text-2xl font-bold text-gray-900">Upload File</h1>

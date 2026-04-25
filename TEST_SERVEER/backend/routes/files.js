@@ -3,7 +3,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs').promises;
-const { readDB, writeDB } = require('../db');
+const { getFilesByUserId, getFileByIdAndUser, insertFile, updateFileName, deleteFileById } = require('../db');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -25,24 +25,23 @@ const upload = multer({
 });
 
 // GET user's files
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', authenticateToken, (req, res) => {
   try {
-    const db = await readDB();
-    const userFiles = db.files.filter(f => f.userId === req.user.id);
+    const userFiles = getFilesByUserId.all(req.user.id);
     res.json(userFiles);
   } catch (error) {
+    console.error('Get files error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // POST upload file
-router.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
+router.post('/upload', authenticateToken, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: 'No file uploaded' });
   }
 
   try {
-    const db = await readDB();
     const newFile = {
       id: uuidv4(),
       userId: req.user.id,
@@ -54,17 +53,17 @@ router.post('/upload', authenticateToken, upload.single('file'), async (req, res
       createdAt: new Date().toISOString()
     };
 
-    db.files.push(newFile);
-    await writeDB(db);
+    insertFile.run(newFile);
 
     res.status(201).json({ message: 'File uploaded successfully', file: newFile });
   } catch (error) {
+    console.error('Upload error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
 // PUT update file metadata (e.g. rename)
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put('/:id', authenticateToken, (req, res) => {
   const { newName } = req.body;
   
   if (!newName) {
@@ -72,18 +71,17 @@ router.put('/:id', authenticateToken, async (req, res) => {
   }
 
   try {
-    const db = await readDB();
-    const fileIndex = db.files.findIndex(f => f.id === req.params.id && f.userId === req.user.id);
-    
-    if (fileIndex === -1) {
+    const file = getFileByIdAndUser.get(req.params.id, req.user.id);
+
+    if (!file) {
       return res.status(404).json({ message: 'File not found or unauthorized' });
     }
 
-    db.files[fileIndex].originalName = newName;
-    await writeDB(db);
+    updateFileName.run(newName, req.params.id, req.user.id);
 
-    res.json({ message: 'File renamed successfully', file: db.files[fileIndex] });
+    res.json({ message: 'File renamed successfully', file: { ...file, originalName: newName } });
   } catch (error) {
+    console.error('Rename error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -91,29 +89,26 @@ router.put('/:id', authenticateToken, async (req, res) => {
 // DELETE file
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    const db = await readDB();
-    const fileIndex = db.files.findIndex(f => f.id === req.params.id && f.userId === req.user.id);
-    
-    if (fileIndex === -1) {
+    const file = getFileByIdAndUser.get(req.params.id, req.user.id);
+
+    if (!file) {
       return res.status(404).json({ message: 'File not found or unauthorized' });
     }
 
-    const file = db.files[fileIndex];
-    
     // Remove from filesystem
     try {
       await fs.unlink(file.path);
     } catch (err) {
       console.error('Failed to delete file from filesystem:', err);
-      // Even if filesystem delete fails (e.g., file already deleted manually), we still remove from DB
+      // Even if filesystem delete fails, we still remove from DB
     }
 
     // Remove from DB
-    db.files.splice(fileIndex, 1);
-    await writeDB(db);
+    deleteFileById.run(req.params.id, req.user.id);
 
     res.json({ message: 'File deleted successfully' });
   } catch (error) {
+    console.error('Delete error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
