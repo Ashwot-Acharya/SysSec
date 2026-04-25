@@ -327,24 +327,7 @@ class CNFConverter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class InsideAlgorithm:
-    """
-    CYK Inside Algorithm for PCFGs in CNF.
 
-    For a sequence w = w_1 w_2 ... w_n, computes a table:
-
-        inside[i][j][A] = P(A  ⟹*  w_i ... w_j)
-
-    i.e., the probability that non-terminal A can generate the substring
-    from position i to position j (inclusive, 0-indexed).
-
-    The probability of the full sequence is:
-        P(w | G) = inside[0][n-1]["S0"]   (or "S" if no S0)
-
-    Anomaly score:
-        score(w) = -log( P(w | G) + ε )
-
-    High score = low probability = anomalous.
-    """
 
     def __init__(self, cnf: CNFConverter):
         self.cnf    = cnf
@@ -466,6 +449,81 @@ class InsideAlgorithm:
                     f"Possible illegal transition after '{sequence[bj]}'.")
 
         return "Sequence is parseable but has very low probability under the grammar."
+    # ... existing methods: __init__, _index_rules, inside,
+    #     sequence_probability, anomaly_score, explain ...
+
+    def explain_with_parse_tree(self, sequence: list[str]) -> dict:
+        table   = self.inside(sequence)
+        n       = len(sequence)
+        unknown = [w for w in sequence if w not in self.cnf.terminals]
+
+        token_parseable = []
+        for i in range(n):
+            covered = any(table.get((i, i, nt), 0) > 0
+                          for nt in self.cnf.non_terminals)
+            token_parseable.append(covered)
+
+        parse_map = {}
+        for i in range(n):
+            for j in range(i, n):
+                covered = any(table.get((i, j, nt), 0) > 0
+                              for nt in self.cnf.non_terminals)
+                parse_map[(i, j)] = covered
+
+        breakdown_idx  = None
+        breakdown_info = None
+
+        for i in range(n):
+            if not token_parseable[i]:
+                breakdown_idx = i
+                breakdown_info = {
+                    "position": i,
+                    "syscall":  sequence[i],
+                    "reason": (
+                        f"'{sequence[i]}' was never seen in training"
+                        if sequence[i] in unknown
+                        else f"'{sequence[i]}' cannot follow "
+                             f"'{sequence[i-1] if i > 0 else 'START'}' "
+                             f"in any learned rule"
+                    )
+                }
+                break
+
+        if breakdown_idx is None and table.get((0, n-1, self.start), 0) == 0:
+            for end in range(n-1, -1, -1):
+                if parse_map.get((0, end)):
+                    breakdown_idx = end + 1
+                    breakdown_info = {
+                        "position": end + 1,
+                        "syscall":  sequence[end + 1] if end + 1 < n else "END",
+                        "reason": (
+                            f"Grammar parsed 0–{end} "
+                            f"({' '.join(sequence[:end+1])}), "
+                            f"but failed at '{sequence[end+1] if end+1 < n else 'END'}'"
+                        )
+                    }
+                    break
+
+        p = table.get((0, n-1, self.start), 0)
+        if unknown:
+            verdict = f"UNKNOWN SYSCALLS: {unknown} — never seen in training."
+        elif p == 0:
+            verdict = (f"PARSE FAILURE at position {breakdown_idx} "
+                       f"('{breakdown_info['syscall']}'). {breakdown_info['reason']}")
+        else:
+            verdict = (f"Low probability sequence. P={p:.2e}, "
+                       f"score={-math.log(p):.2f}. Unusual ordering.")
+
+        return {
+            "sequence":         sequence,
+            "length":           n,
+            "token_parseable":  token_parseable,
+            "parse_map":        {f"{i},{j}": v for (i, j), v in parse_map.items()},
+            "breakdown":        breakdown_info,
+            "unknown_syscalls": unknown,
+            "full_parse_prob":  p,
+            "verdict":          verdict,
+        }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -473,6 +531,7 @@ class InsideAlgorithm:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnomalyDetector:
+    
     """
     Full pipeline:
         train(normal_traces)
@@ -556,20 +615,14 @@ class AnomalyDetector:
         print(f"           threshold (μ + {self.z_threshold}σ) = {self.threshold:.4f}")
 
     # ── Prediction ────────────────────────────────────────────────────────────
-
-    def predict(self, sequence: list[str]) -> tuple[bool, float, str]:
-        """
-        Returns (is_anomaly, score, explanation).
-        """
-        if self.inside is None:
-            raise RuntimeError("Call train() before predict().")
-
-        score       = self.inside.anomaly_score(sequence)
-        is_anomaly  = score > self.threshold
-        explanation = ""
-
+    def predict(self, sequence):
+        score      = self.inside.anomaly_score(sequence)
+        is_anomaly = score > self.threshold
+        
+        explanation = {}
         if is_anomaly:
-            explanation = self.inside.explain(sequence)
+            # Full rich parse explanation instead of a plain string
+            explanation = self.inside.explain_with_parse_tree(sequence)
 
         return is_anomaly, score, explanation
 
@@ -602,6 +655,8 @@ def test_pcfg_basic():
         total = sum(p for _, p in prods)
         ok = abs(total - 1.0) < 1e-6
         print(f"  P-sum for {lhs}: {total:.6f}  {'✓' if ok else '✗ BAD'}")
+
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT

@@ -159,33 +159,29 @@ def _start_reader_threads(proc: "subprocess.Popen",
 # ANOMALY REPORTER
 # ═════════════════════════════════════════════════════════════════════════════
 
-def report_anomaly(cycle: int, pid: str, batch: list[str],
-                   score: float, explanation: str,
-                   api_url: Optional[str]) -> None:
-    """Print anomaly details and optionally POST to backend API."""
+def report_anomaly(cycle, pid, batch, score, explanation, api_url):
+    verdict = explanation.get("verdict", str(explanation)) if isinstance(explanation, dict) else explanation
+    breakdown = explanation.get("breakdown") if isinstance(explanation, dict) else None
+    unknown   = explanation.get("unknown_syscalls", []) if isinstance(explanation, dict) else []
+
     print(f"  ╔══ ANOMALY DETAILS ══════════════════════════════╗")
-    print(f"  ║ Score      : {score:.4f}")
-    print(f"  ║ Syscalls   : {' '.join(batch[:12])}{'...' if len(batch) > 12 else ''}")
-    print(f"  ║ Explanation: {explanation[:80]}")
+    print(f"  ║ Score    : {score:.4f}")
+    print(f"  ║ Syscalls : {' '.join(batch[:12])}{'...' if len(batch) > 12 else ''}")
+    print(f"  ║ Verdict  : {verdict[:80]}")
+    if breakdown:
+        print(f"  ║ Broke at : pos {breakdown['position']} — '{breakdown['syscall']}'")
+        print(f"  ║ Reason   : {breakdown['reason'][:80]}")
+    if unknown:
+        print(f"  ║ Unknown  : {unknown}")
     print(f"  ╚════════════════════════════════════════════════╝")
 
     if api_url:
         event = {
-            "cycle":       cycle,
-            "timestamp":   time.time(),
-            "pid":         pid,
-            "sequence":    batch,
-            "score":       score,
-            "explanation": explanation,
+            "cycle": cycle, "pid": pid,
+            "score": score, "sequence": batch,
+            "explanation": explanation if isinstance(explanation, dict) else {"verdict": explanation},
         }
-        try:
-            # Uncomment when backend is ready:
-            # import requests
-            # requests.post(api_url, json=event, timeout=0.5)
-            print(f"  [API] Would POST to {api_url}:")
-            print(f"        {json.dumps(event, indent=4)[:200]}...")
-        except Exception as e:
-            print(f"  [API] Error: {e}")
+        print(f"  [API] Would POST → {api_url}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
