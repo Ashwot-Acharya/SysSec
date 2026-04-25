@@ -1,23 +1,3 @@
-"""
-PCFG → CNF → CYK Inside Algorithm
-====================================
-Anomaly scoring for the CFG-Based IDS project.
-
-Pipeline (this file):
-  1. PCFG     — take SequiturSimple grammar, count rule frequencies across
-                 training traces, normalize to probabilities
-  2. CNF      — convert the PCFG into Chomsky Normal Form so CYK can run
-  3. Inside   — CYK dynamic-programming table gives P(sequence | grammar)
-  4. Scoring  — anomaly_score = -log P(sequence | grammar)
-  5. Threshold — fit on held-out normal data, flag anything above μ + 3σ
-
-How to run:
-  python pcfg_inside.py
-
-Depends on:
-  sequitur.py  (SequiturSimple must be importable)
-"""
-
 from __future__ import annotations
 import math
 import re
@@ -40,30 +20,16 @@ except ImportError:
 # Learn probabilities for each grammar rule by counting across training traces.
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _default_int_dd():
+    return defaultdict(int)
+
+
 class PCFG:
-    """
-    Probabilistic Context-Free Grammar.
-
-    Attributes
-    ----------
-    rules : dict[str, list[tuple[list[str], float]]]
-        { "S": [( ["R1","R2"], 0.6 ), ( ["R1","open"], 0.4 )], ... }
-        Each non-terminal maps to a list of (production_body, probability).
-
-    terminals : set[str]
-        All terminal symbols seen during training.
-
-    non_terminals : set[str]
-        All non-terminal symbols (rule heads).
-    """
-
     def __init__(self):
-        # raw_counts[lhs][(rhs_tuple)] = count
-        self._raw_counts: dict[str, dict[tuple, int]] = defaultdict(lambda: defaultdict(int))
-        self.rules:        dict[str, list[tuple[list[str], float]]] = {}
-        self.terminals:    set[str] = set()
-        self.non_terminals: set[str] = set()
-
+        self._raw_counts = defaultdict(_default_int_dd)
+        self.rules = {}
+        self.terminals = set()
+        self.non_terminals = set()
     # ── Training ──────────────────────────────────────────────────────────────
 
     def train(self, traces: list[list[str]]) -> None:
@@ -361,24 +327,7 @@ class CNFConverter:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class InsideAlgorithm:
-    """
-    CYK Inside Algorithm for PCFGs in CNF.
 
-    For a sequence w = w_1 w_2 ... w_n, computes a table:
-
-        inside[i][j][A] = P(A  ⟹*  w_i ... w_j)
-
-    i.e., the probability that non-terminal A can generate the substring
-    from position i to position j (inclusive, 0-indexed).
-
-    The probability of the full sequence is:
-        P(w | G) = inside[0][n-1]["S0"]   (or "S" if no S0)
-
-    Anomaly score:
-        score(w) = -log( P(w | G) + ε )
-
-    High score = low probability = anomalous.
-    """
 
     def __init__(self, cnf: CNFConverter):
         self.cnf    = cnf
@@ -400,7 +349,6 @@ class InsideAlgorithm:
                 elif len(body) == 2:
                     self._binary_rules[(body[0], body[1])].append((lhs, prob))
 
-    # ── Core CYK ──────────────────────────────────────────────────────────────
 
     def inside(self, sequence: list[str]) -> dict:
         """
@@ -501,6 +449,81 @@ class InsideAlgorithm:
                     f"Possible illegal transition after '{sequence[bj]}'.")
 
         return "Sequence is parseable but has very low probability under the grammar."
+    # ... existing methods: __init__, _index_rules, inside,
+    #     sequence_probability, anomaly_score, explain ...
+
+    def explain_with_parse_tree(self, sequence: list[str]) -> dict:
+        table   = self.inside(sequence)
+        n       = len(sequence)
+        unknown = [w for w in sequence if w not in self.cnf.terminals]
+
+        token_parseable = []
+        for i in range(n):
+            covered = any(table.get((i, i, nt), 0) > 0
+                          for nt in self.cnf.non_terminals)
+            token_parseable.append(covered)
+
+        parse_map = {}
+        for i in range(n):
+            for j in range(i, n):
+                covered = any(table.get((i, j, nt), 0) > 0
+                              for nt in self.cnf.non_terminals)
+                parse_map[(i, j)] = covered
+
+        breakdown_idx  = None
+        breakdown_info = None
+
+        for i in range(n):
+            if not token_parseable[i]:
+                breakdown_idx = i
+                breakdown_info = {
+                    "position": i,
+                    "syscall":  sequence[i],
+                    "reason": (
+                        f"'{sequence[i]}' was never seen in training"
+                        if sequence[i] in unknown
+                        else f"'{sequence[i]}' cannot follow "
+                             f"'{sequence[i-1] if i > 0 else 'START'}' "
+                             f"in any learned rule"
+                    )
+                }
+                break
+
+        if breakdown_idx is None and table.get((0, n-1, self.start), 0) == 0:
+            for end in range(n-1, -1, -1):
+                if parse_map.get((0, end)):
+                    breakdown_idx = end + 1
+                    breakdown_info = {
+                        "position": end + 1,
+                        "syscall":  sequence[end + 1] if end + 1 < n else "END",
+                        "reason": (
+                            f"Grammar parsed 0–{end} "
+                            f"({' '.join(sequence[:end+1])}), "
+                            f"but failed at '{sequence[end+1] if end+1 < n else 'END'}'"
+                        )
+                    }
+                    break
+
+        p = table.get((0, n-1, self.start), 0)
+        if unknown:
+            verdict = f"UNKNOWN SYSCALLS: {unknown} — never seen in training."
+        elif p == 0:
+            verdict = (f"PARSE FAILURE at position {breakdown_idx} "
+                       f"('{breakdown_info['syscall']}'). {breakdown_info['reason']}")
+        else:
+            verdict = (f"Low probability sequence. P={p:.2e}, "
+                       f"score={-math.log(p):.2f}. Unusual ordering.")
+
+        return {
+            "sequence":         sequence,
+            "length":           n,
+            "token_parseable":  token_parseable,
+            "parse_map":        {f"{i},{j}": v for (i, j), v in parse_map.items()},
+            "breakdown":        breakdown_info,
+            "unknown_syscalls": unknown,
+            "full_parse_prob":  p,
+            "verdict":          verdict,
+        }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -508,6 +531,7 @@ class InsideAlgorithm:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AnomalyDetector:
+    
     """
     Full pipeline:
         train(normal_traces)
@@ -591,20 +615,14 @@ class AnomalyDetector:
         print(f"           threshold (μ + {self.z_threshold}σ) = {self.threshold:.4f}")
 
     # ── Prediction ────────────────────────────────────────────────────────────
-
-    def predict(self, sequence: list[str]) -> tuple[bool, float, str]:
-        """
-        Returns (is_anomaly, score, explanation).
-        """
-        if self.inside is None:
-            raise RuntimeError("Call train() before predict().")
-
-        score       = self.inside.anomaly_score(sequence)
-        is_anomaly  = score > self.threshold
-        explanation = ""
-
+    def predict(self, sequence):
+        score      = self.inside.anomaly_score(sequence)
+        is_anomaly = score > self.threshold
+        
+        explanation = {}
         if is_anomaly:
-            explanation = self.inside.explain(sequence)
+            # Full rich parse explanation instead of a plain string
+            explanation = self.inside.explain_with_parse_tree(sequence)
 
         return is_anomaly, score, explanation
 
@@ -638,148 +656,6 @@ def test_pcfg_basic():
         ok = abs(total - 1.0) < 1e-6
         print(f"  P-sum for {lhs}: {total:.6f}  {'✓' if ok else '✗ BAD'}")
 
-
-def test_cnf_conversion():
-    _separator("TEST 2 — CNF conversion + validity check")
-
-    traces = [
-        ['open','read','close'],
-        ['open','read','read','close'],
-        ['open','write','close'],
-        ['open','read','write','close'],
-        ['open','read','close'],
-    ]
-
-    pcfg = PCFG()
-    pcfg.train(traces)
-
-    cnf = CNFConverter().convert(pcfg)
-    cnf.print_grammar()
-
-    print("\n  Verifying CNF constraints:")
-    valid = cnf.verify_cnf()
-    print(f"  CNF valid: {'✓ YES' if valid else '✗ NO'}")
-
-
-def test_inside_toy():
-    _separator("TEST 3 — Inside algorithm on toy grammar")
-
-    cnf = CNFConverter()
-    cnf.rules = {
-        "S":  [(["A", "B"], 1.0)],
-        "A":  [(["open"],   1.0)],
-        "B":  [(["close"],  1.0)],
-    }
-    cnf.terminals     = {"open", "close"}
-    cnf.non_terminals = {"S", "A", "B"}
-
-    engine = InsideAlgorithm(cnf)
-
-    p1 = engine.sequence_probability(["open", "close"])
-    p2 = engine.sequence_probability(["open", "open"])
-    p3 = engine.sequence_probability(["close"])
-
-    print(f"  P(open close)  = {p1:.6f}  (expected 1.0)")
-    print(f"  P(open open)   = {p2:.6f}  (expected 0.0)")
-    print(f"  P(close)       = {p3:.6f}  (expected 0.0)")
-
-    s1 = engine.anomaly_score(["open", "close"])
-    s2 = engine.anomaly_score(["open", "open"])
-    print(f"\n  score(open close) = {s1:.4f}  (expected ~0)")
-    print(f"  score(open open)  = {s2:.4f}  (expected 1000 = cap)")
-
-
-def test_full_pipeline():
-    _separator("TEST 4 — Full pipeline: train → threshold → predict")
-
-    # Simulate a small ADFA-like dataset
-    # Normal: file operations (open, read, write, close)
-    normal_traces = [
-        ['open','read','close'],
-        ['open','read','read','close'],
-        ['open','write','close'],
-        ['open','read','write','close'],
-        ['open','read','close'],
-        ['open','write','write','close'],
-        ['open','read','write','close'],
-        ['open','read','read','write','close'],
-        ['open','read','close'],
-        ['open','write','close'],
-    ] * 3   # 30 traces total for stable statistics
-
-    detector = AnomalyDetector(z_threshold=2.0)
-    detector.train(normal_traces, holdout_fraction=0.3)
-
-    # Test sequences
-    test_cases = [
-        (['open','read','close'],                    "normal — file read"),
-        (['open','write','close'],                   "normal — file write"),
-        (['open','read','write','close'],            "normal — read then write"),
-        (['open','mmap','execve','connect','send'],  "ATTACK — shellcode pattern"),
-        (['connect','send','recv'],                  "ATTACK — network without open"),
-        (['open','read','read','read',
-          'read','read','read','read',
-          'read','close'],                           "suspicious — very long read loop"),
-        (['close','read','open'],                    "suspicious — reversed order"),
-    ]
-
-    print(f"\n  {'Sequence':<45} {'Score':>8}  {'Flag':<8}  Explanation")
-    print(f"  {'─'*45} {'─'*8}  {'─'*8}  {'─'*30}")
-
-    for seq, label in test_cases:
-        is_anom, score, expl = detector.predict(seq)
-        flag   = "⚠️ ANOM" if is_anom else "✓ OK"
-        score_str = f"{score:.2f}" if score < 999 else "∞"
-        seq_str   = ' '.join(seq)[:42] + ("..." if len(' '.join(seq)) > 42 else "")
-        print(f"  {seq_str:<45} {score_str:>8}  {flag:<8}")
-        if is_anom and expl:
-            print(f"  {'':>45}   └─ {expl[:80]}")
-
-    print(f"\n  Decision threshold: {detector.threshold:.4f}")
-
-
-def test_expressiveness():
-    _separator("TEST 5 — Context-free expressiveness vs regular")
-
-    print("""
-  The language L = {{ open^n close^n | n ≥ 1 }} is provably NOT regular
-  (Pumping Lemma for Regular Languages).
-  
-  DeepLog (LSTM ≈ regular) will fail on deep nesting.
-  Our PCFG captures the hierarchical structure natively.
-
-  Generating open^n close^n for n = 1..5 and scoring:
-""")
-
-    normal_traces = []
-    for _ in range(20):
-        for n in range(1, 4):
-            normal_traces.append(['open']*n + ['close']*n)
-
-    detector = AnomalyDetector(z_threshold=2.0)
-    detector.train(normal_traces)
-
-    print(f"  {'Sequence':<35} {'Score':>8}  Flag")
-    print(f"  {'─'*35} {'─'*8}  {'─'*8}")
-
-    test_cases = [
-        (['open','close'],                        "n=1 (trained)"),
-        (['open','open','close','close'],          "n=2 (trained)"),
-        (['open','open','open','close','close',
-          'close'],                               "n=3 (trained)"),
-        (['open','open','open','open','close',
-          'close','close','close'],               "n=4 (unseen depth)"),
-        (['open','close','open','close'],          "flat (different structure)"),
-        (['open','open','close'],                  "MISMATCH: 2 opens 1 close"),
-        (['close','open'],                         "REVERSED: close before open"),
-    ]
-
-    for seq, label in test_cases:
-        is_anom, score, expl = detector.predict(seq)
-        flag = "⚠️ ANOM" if is_anom else "✓ OK"
-        score_str = f"{score:.2f}" if score < 999 else "∞"
-        seq_str = ' '.join(seq)
-        print(f"  {seq_str:<35} {score_str:>8}  {flag}  ({label})")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
