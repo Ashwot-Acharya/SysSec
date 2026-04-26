@@ -22,7 +22,6 @@ if (!fs.existsSync(uploadsDir)) {
 // Routes
 app.use('/auth', authRoutes);
 app.use('/files', fileRoutes);
-app.use('/api/vuln', require('./routes/vulns')); // Intentionally vulnerable routes for testing
 
 // Static file serving for uploads (if we want to preview images directly)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
