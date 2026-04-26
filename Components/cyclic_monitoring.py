@@ -43,8 +43,6 @@ import json
 import websockets
 import asyncio
 import requests
-import websockets
-import asyncio
 from collections import defaultdict
 from typing import Optional
 
@@ -367,15 +365,6 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
         )
         ws_thread.start()
 
-    # Start persistent WebSocket sender thread
-    send_queue: list[str] = []
-    send_lock = threading.Lock()
-    if api_url:
-        ws_thread = threading.Thread(
-            target=_ws_sender_thread, args=(api_url, send_queue, send_lock), daemon=True
-        )
-        ws_thread.start()
-
     try:
         proc = subprocess.Popen(
             cmd,
@@ -407,10 +396,6 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                     print(f"  ✓ First syscall captured: {syscall!r}")
 
                 batch.append(syscall)
-                
-                # Instantly queue this raw syscall for the live dashboard
-                if api_url:
-                    post_raw_syscalls([syscall], pid, send_queue, send_lock)
 
                 # Stream raw syscalls to dashboard (per-cycle batch sent after boundary)
                 if api_url:
@@ -447,8 +432,8 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
 
                     if is_anom:
                         total_anomalies += 1
-                        report_anomaly(cycle, pid, cycle_syscalls,
-                                       score, explanation,
+                        report_anomaly(scored_cycles, pid, cycle_syscalls,
+                                       score, explanation, threshold,
                                        send_queue, send_lock)
 
             if proc.poll() is not None:
@@ -471,13 +456,13 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                 scored_cycles += 1
                 is_anom, score, explanation = detector.predict(cycle_syscalls)
                 score_str = f"{score:.4f}" if score < 999 else "∞"
-                flag = "ANOMALY" if is_anom else "✓  normal"
+                flag      = "⚠ ANOMALY" if is_anom else "✓ normal"
                 print(f"\n  [Final cycle] {len(cycle_syscalls)} syscalls | "
                       f"score={score_str} | {flag}")
                 if is_anom:
                     total_anomalies += 1
-                    report_anomaly(cycle, pid, cycle_syscalls,
-                                   score, explanation,
+                    report_anomaly(scored_cycles, pid, cycle_syscalls,
+                                   score, explanation, threshold,
                                    send_queue, send_lock)
 
     finally:
