@@ -39,6 +39,9 @@ function App() {
 
     onWelcome: useCallback((msg) => {
       setWelcomeInfo(msg);
+      // Clear stale data on new connection (e.g. server restart)
+      setSyscalls([]);
+      setAnomalies([]);
     }, []),
   };
 

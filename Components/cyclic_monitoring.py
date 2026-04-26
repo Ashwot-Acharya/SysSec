@@ -30,6 +30,8 @@ import threading
 import datetime
 import json
 import requests
+import websockets
+import asyncio
 from collections import defaultdict
 from typing import Optional
 
@@ -157,10 +159,12 @@ def _start_reader_threads(proc: "subprocess.Popen",
 # ANOMALY REPORTER
 # ═════════════════════════════════════════════════════════════════════════════
 
-def report_anomaly(cycle, pid, batch, score, explanation, api_url):
+def report_anomaly(cycle, pid, batch, score, explanation, send_queue, send_lock):
     verdict = explanation.get("verdict", str(explanation)) if isinstance(explanation, dict) else explanation
     breakdown = explanation.get("breakdown") if isinstance(explanation, dict) else None
     unknown   = explanation.get("unknown_syscalls", []) if isinstance(explanation, dict) else []
+    parse_spans = explanation.get("parse_spans", []) if isinstance(explanation, dict) else []
+    token_parseable = explanation.get("token_parseable", []) if isinstance(explanation, dict) else []
 
     print(f"  ╔══ ANOMALY DETAILS ══════════════════════════════╗")
     print(f"  ║ Score    : {score:.4f}")
@@ -173,31 +177,68 @@ def report_anomaly(cycle, pid, batch, score, explanation, api_url):
         print(f"  ║ Unknown  : {unknown}")
     print(f"  ╚════════════════════════════════════════════════╝")
 
-    if api_url:
-        event = {
-            "cycle": cycle, "pid": pid,
-            "score": score, "sequence": batch,
-            "explanation": explanation if isinstance(explanation, dict) else {"verdict": explanation},
-        }
-        # We no longer POST to /anomaly because the backend Server (syscall_anomaly_server.py)
-        # receives the raw syscalls via post_raw_syscalls() and does its own Anomaly Detection
-        # and WebSocket broadcasting. Posting here would cause duplicate alerts.
-        # print(f"  [API] POSTing Anomaly → {api_url}")
-        # try:
-        #     requests.post(f"{api_url}/anomaly", json=event, timeout=2.0)
-        # except Exception as e:
-        #     print(f"  [API] POST failed: {e}")
+    # Send anomaly alert through the WebSocket to the backend for broadcasting
+    if send_queue is not None:
+        failed_pos = breakdown.get("position", len(batch) - 1) if breakdown else len(batch) - 1
+        anomaly_msg = json.dumps({
+            "type": "anomaly",
+            "timestamp": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "anomaly_score": score if score < 999 else 999.99,
+            "threshold": 7.0,
+            "window_sequence": batch,
+            "failure_reason": verdict,
+            "failed_at_position": failed_pos,
+            "expected_tokens": [],
+            "parse_tree": {
+                "token_parseable": token_parseable or [True] * len(batch),
+                "breakdown": breakdown,
+                "verdict": verdict,
+                "unknown_syscalls": unknown,
+                "parse_spans": parse_spans,
+            },
+        })
+        with send_lock:
+            send_queue.append(anomaly_msg)
 
-def post_raw_syscalls(batch: list[str], pid: str, api_url: str):
-    """Post raw syscalls to the backend so the dashboard feed updates."""
-    if not api_url:
-        return
-    
-    # The backend expects /api/syscalls/batch with specific fields
-    payload = []
+def _ws_sender_thread(api_url: str, send_queue: list, send_lock: threading.Lock):
+    """Background thread: maintains a persistent WebSocket to the backend ingest endpoint."""
+    # Convert http://host:port to ws://host:port/ws/ingest
+    base = api_url.rstrip('/')
+    if base.startswith('http://'):
+        ws_url = 'ws://' + base[len('http://'):] + '/ws/ingest'
+    elif base.startswith('https://'):
+        ws_url = 'wss://' + base[len('https://'):] + '/ws/ingest'
+    elif base.startswith('ws://') or base.startswith('wss://'):
+        ws_url = base + '/ws/ingest'
+    else:
+        ws_url = 'ws://' + base + '/ws/ingest'
+
+    async def _run():
+        while True:
+            try:
+                async with websockets.connect(ws_url) as ws:
+                    print(f"  [WS] Connected to {ws_url}")
+                    while True:
+                        with send_lock:
+                            items = send_queue[:]
+                            send_queue.clear()
+                        if items:
+                            for msg in items:
+                                await ws.send(msg)
+                        else:
+                            await asyncio.sleep(0.05)
+            except Exception as e:
+                print(f"  [WS] Connection lost ({e}), reconnecting in 2s...")
+                await asyncio.sleep(2)
+
+    asyncio.run(_run())
+
+
+def post_raw_syscalls(batch: list[str], pid: str, send_queue: list, send_lock: threading.Lock):
+    """Queue raw syscalls to be sent to the backend via WebSocket."""
     ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
     for syscall in batch:
-        payload.append({
+        msg = json.dumps({
             "timestamp": ts,
             "thread": "T1",
             "pid": int(pid) if pid.isdigit() else 0,
@@ -205,17 +246,8 @@ def post_raw_syscalls(batch: list[str], pid: str, api_url: str):
             "args": "",
             "return_value": 0
         })
-    
-    try:
-        # Strip trailing slash if present and append the batch path
-        base = api_url.rstrip('/')
-        # If the user passed the whole path /api/syscalls/batch, don't append
-        url = base if base.endswith('/batch') else f"{base}/api/syscalls/batch"
-        resp = requests.post(url, json={"syscalls": payload}, timeout=1.0)
-        if resp.status_code != 200:
-            print(f"  [API] POST {url} returned {resp.status_code}: {resp.text[:100]}")
-    except Exception as e:
-        print(f"  [API] POST failed: {e}")
+        with send_lock:
+            send_queue.append(msg)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -257,6 +289,15 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
     lock    = threading.Lock()
     proc    = None
 
+    # Start persistent WebSocket sender thread
+    send_queue: list[str] = []
+    send_lock = threading.Lock()
+    if api_url:
+        ws_thread = threading.Thread(
+            target=_ws_sender_thread, args=(api_url, send_queue, send_lock), daemon=True
+        )
+        ws_thread.start()
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -289,9 +330,9 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
 
                 batch.append(syscall)
                 
-                # Instantly post this raw syscall to feed the live dashboard
+                # Instantly queue this raw syscall for the live dashboard
                 if api_url:
-                    post_raw_syscalls([syscall], pid, api_url)
+                    post_raw_syscalls([syscall], pid, send_queue, send_lock)
 
                 # ── Cycle boundary: idle syscall seen ─────────────────────
                 if syscall in IDLE_SYSCALLS:
@@ -316,7 +357,8 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                     if is_anom:
                         total_anomalies += 1
                         report_anomaly(cycle, pid, cycle_syscalls,
-                                       score, explanation, api_url)
+                                       score, explanation,
+                                       send_queue, send_lock)
 
             if proc.poll() is not None:
                 print(f"\n  Process exited (code {proc.returncode}).")
@@ -338,13 +380,14 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                 cycle += 1
                 is_anom, score, explanation = detector.predict(cycle_syscalls)
                 score_str = f"{score:.4f}" if score < 999 else "∞"
-                flag = "⚠️  ANOMALY" if is_anom else "✓  normal"
+                flag = "ANOMALY" if is_anom else "✓  normal"
                 print(f"\n  [Final cycle] {len(cycle_syscalls)} syscalls | "
                       f"score={score_str} | {flag}")
                 if is_anom:
                     total_anomalies += 1
                     report_anomaly(cycle, pid, cycle_syscalls,
-                                   score, explanation, api_url)
+                                   score, explanation,
+                                   send_queue, send_lock)
 
     finally:
         if proc and proc.poll() is None:
