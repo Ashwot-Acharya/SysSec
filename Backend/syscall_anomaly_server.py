@@ -659,6 +659,7 @@ async def websocket_ingest(ws: WebSocket) -> None:
             data = await ws.receive_text()
             try:
                 msg = json.loads(data)
+
                 # If the collector sends a pre-built anomaly alert, broadcast it directly
                 if msg.get("type") == "anomaly":
                     await broadcast_to_clients(msg)
@@ -666,6 +667,7 @@ async def websocket_ingest(ws: WebSocket) -> None:
                     log.warning("ANOMALY (from collector) | score=%.2f | %s",
                                 msg.get("anomaly_score", 0), msg.get("failure_reason", ""))
                     continue
+
                 sc = ParsedSyscall(
                     timestamp=str(msg.get("timestamp", "")),
                     thread=str(msg.get("thread", "unknown")),

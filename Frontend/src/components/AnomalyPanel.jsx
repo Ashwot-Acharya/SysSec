@@ -126,7 +126,7 @@ function AnomalyCard({ anomaly, isNew }) {
           </button>
           
           {showParseTree && (
-            <ParseTreeView anomaly={anomaly} />
+            <ParseTreeView anomaly={anomaly} onClose={() => setShowParseTree(false)} />
           )}
         </>
       )}

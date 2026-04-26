@@ -479,26 +479,87 @@ class InsideAlgorithm:
         return table
 
     def explain_with_parse_tree(self, sequence: list[str]) -> dict:
-        """For frontend parse-tree panel only."""
-        table = self.inside(sequence)
-        n     = len(sequence)
-        unknown = [w for w in sequence if not self._terminal_rules.get(w)]
-        token_parseable = [
-            any(table.get((i, i, nt), 0.0) > 0.0 for nt in self.cnf.non_terminals)
-            for i in range(n)
-        ]
-        parse_spans = [
-            [i, j]
-            for i in range(n)
-            for j in range(i, n)
-            if any(table.get((i, j, nt), 0.0) > 0.0 for nt in self.cnf.non_terminals)
-        ]
+        table   = self.inside(sequence)
+        n       = len(sequence)
+        unknown = [w for w in sequence if w not in self.cnf.terminals]
+
+        token_parseable = []
+        for i in range(n):
+            covered = any(table.get((i, i, nt), 0) > 0
+                          for nt in self.cnf.non_terminals)
+            token_parseable.append(covered)
+
+        parse_map = {}
+        parse_spans = []
+        for i in range(n):
+            for j in range(i, n):
+                covered = any(table.get((i, j, nt), 0) > 0
+                              for nt in self.cnf.non_terminals)
+                parse_map[(i, j)] = covered
+                
+                # Generate visual spans for valid sequences of length > 1
+                if covered and j > i and (j - i) <= 4:
+                    label = " → ".join(sequence[i:j+1])
+                    if len(label) > 40:
+                        label = label[:37] + "..."
+                    parse_spans.append({
+                        "start": i,
+                        "end": j,
+                        "label": label,
+                        "valid": True
+                    })
+
+        breakdown_idx  = None
+        breakdown_info = None
+
+        for i in range(n):
+            if not token_parseable[i]:
+                breakdown_idx = i
+                breakdown_info = {
+                    "position": i,
+                    "syscall":  sequence[i],
+                    "reason": (
+                        f"'{sequence[i]}' was never seen in training"
+                        if sequence[i] in unknown
+                        else f"'{sequence[i]}' cannot follow "
+                             f"'{sequence[i-1] if i > 0 else 'START'}' "
+                             f"in any learned rule"
+                    )
+                }
+                break
+
+        if breakdown_idx is None and table.get((0, n-1, self.start), 0) == 0:
+            for end in range(n-1, -1, -1):
+                if parse_map.get((0, end)):
+                    breakdown_idx = end + 1
+                    breakdown_info = {
+                        "position": end + 1,
+                        "syscall":  sequence[end + 1] if end + 1 < n else "END",
+                        "reason": (
+                            f"Grammar parsed 0–{end} "
+                            f"({' '.join(sequence[:end+1])}), "
+                            f"but failed at '{sequence[end+1] if end+1 < n else 'END'}'"
+                        )
+                    }
+                    break
+
+        p = table.get((0, n-1, self.start), 0)
+        if unknown:
+            verdict = f"UNKNOWN SYSCALLS: {unknown} — never seen in training."
+        elif p == 0:
+            verdict = (f"PARSE FAILURE at position {breakdown_idx} "
+                       f"('{breakdown_info['syscall']}'). {breakdown_info['reason']}")
+        else:
+            verdict = (f"Low probability sequence. P={p:.2e}, "
+                       f"score={-math.log(p):.2f}. Unusual ordering.")
+
         return {
             "sequence":         sequence,
             "length":           n,
             "token_parseable":  token_parseable,
+            "parse_map":        {f"{i},{j}": v for (i, j), v in parse_map.items()},
             "parse_spans":      parse_spans,
-            "breakdown":        None,
+            "breakdown":        breakdown_info,
             "unknown_syscalls": unknown,
             "full_parse_prob":  table.get((0, n-1, self.start), 0.0),
             "verdict":          "CYK visualization — anomaly score from NGramScorer.",

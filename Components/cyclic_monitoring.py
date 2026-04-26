@@ -43,6 +43,8 @@ import json
 import websockets
 import asyncio
 import requests
+import websockets
+import asyncio
 from collections import defaultdict
 from typing import Optional
 
@@ -215,6 +217,7 @@ def _start_reader_threads(proc: "subprocess.Popen",
 # ANOMALY REPORTER
 # ═════════════════════════════════════════════════════════════════════════════
 
+<<<<<<< HEAD
 def report_anomaly(cycle: int, pid: str, batch: list, score: float,
                    explanation: dict, threshold: float,
                    send_queue: list, send_lock: threading.Lock) -> None:
@@ -223,6 +226,13 @@ def report_anomaly(cycle: int, pid: str, batch: list, score: float,
     breakdown       = explanation.get("breakdown") if isinstance(explanation, dict) else None
     unknown         = explanation.get("unknown_syscalls", []) if isinstance(explanation, dict) else []
     parse_spans     = explanation.get("parse_spans", []) if isinstance(explanation, dict) else []
+=======
+def report_anomaly(cycle, pid, batch, score, explanation, send_queue, send_lock):
+    verdict = explanation.get("verdict", str(explanation)) if isinstance(explanation, dict) else explanation
+    breakdown = explanation.get("breakdown") if isinstance(explanation, dict) else None
+    unknown   = explanation.get("unknown_syscalls", []) if isinstance(explanation, dict) else []
+    parse_spans = explanation.get("parse_spans", []) if isinstance(explanation, dict) else []
+>>>>>>> ankit
     token_parseable = explanation.get("token_parseable", []) if isinstance(explanation, dict) else []
 
     print(f"  ╔══ ANOMALY DETAILS ══════════════════════════════╗")
@@ -240,6 +250,7 @@ def report_anomaly(cycle: int, pid: str, batch: list, score: float,
     if send_queue is not None:
         failed_pos = breakdown.get("position", len(batch) - 1) if breakdown else len(batch) - 1
         anomaly_msg = json.dumps({
+<<<<<<< HEAD
             "type":              "anomaly",
             "timestamp":         datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
             "anomaly_score":     score if score < 999 else 999.99,
@@ -307,6 +318,75 @@ def post_raw_syscalls(syscall: str, pid: str,
     })
     with send_lock:
         send_queue.append(msg)
+=======
+            "type": "anomaly",
+            "timestamp": datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "anomaly_score": score if score < 999 else 999.99,
+            "threshold": 7.0,
+            "window_sequence": batch,
+            "failure_reason": verdict,
+            "failed_at_position": failed_pos,
+            "expected_tokens": [],
+            "parse_tree": {
+                "token_parseable": token_parseable or [True] * len(batch),
+                "breakdown": breakdown,
+                "verdict": verdict,
+                "unknown_syscalls": unknown,
+                "parse_spans": parse_spans,
+            },
+        })
+        with send_lock:
+            send_queue.append(anomaly_msg)
+
+def _ws_sender_thread(api_url: str, send_queue: list, send_lock: threading.Lock):
+    """Background thread: maintains a persistent WebSocket to the backend ingest endpoint."""
+    # Convert http://host:port to ws://host:port/ws/ingest
+    base = api_url.rstrip('/')
+    if base.startswith('http://'):
+        ws_url = 'ws://' + base[len('http://'):] + '/ws/ingest'
+    elif base.startswith('https://'):
+        ws_url = 'wss://' + base[len('https://'):] + '/ws/ingest'
+    elif base.startswith('ws://') or base.startswith('wss://'):
+        ws_url = base + '/ws/ingest'
+    else:
+        ws_url = 'ws://' + base + '/ws/ingest'
+
+    async def _run():
+        while True:
+            try:
+                async with websockets.connect(ws_url) as ws:
+                    print(f"  [WS] Connected to {ws_url}")
+                    while True:
+                        with send_lock:
+                            items = send_queue[:]
+                            send_queue.clear()
+                        if items:
+                            for msg in items:
+                                await ws.send(msg)
+                        else:
+                            await asyncio.sleep(0.05)
+            except Exception as e:
+                print(f"  [WS] Connection lost ({e}), reconnecting in 2s...")
+                await asyncio.sleep(2)
+
+    asyncio.run(_run())
+
+
+def post_raw_syscalls(batch: list[str], pid: str, send_queue: list, send_lock: threading.Lock):
+    """Queue raw syscalls to be sent to the backend via WebSocket."""
+    ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    for syscall in batch:
+        msg = json.dumps({
+            "timestamp": ts,
+            "thread": "T1",
+            "pid": int(pid) if pid.isdigit() else 0,
+            "syscall": syscall,
+            "args": "",
+            "return_value": 0
+        })
+        with send_lock:
+            send_queue.append(msg)
+>>>>>>> ankit
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -365,6 +445,15 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
         )
         ws_thread.start()
 
+    # Start persistent WebSocket sender thread
+    send_queue: list[str] = []
+    send_lock = threading.Lock()
+    if api_url:
+        ws_thread = threading.Thread(
+            target=_ws_sender_thread, args=(api_url, send_queue, send_lock), daemon=True
+        )
+        ws_thread.start()
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -396,6 +485,10 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                     print(f"  ✓ First syscall captured: {syscall!r}")
 
                 batch.append(syscall)
+                
+                # Instantly queue this raw syscall for the live dashboard
+                if api_url:
+                    post_raw_syscalls([syscall], pid, send_queue, send_lock)
 
                 # Stream raw syscalls to dashboard (per-cycle batch sent after boundary)
                 if api_url:
@@ -432,8 +525,8 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
 
                     if is_anom:
                         total_anomalies += 1
-                        report_anomaly(scored_cycles, pid, cycle_syscalls,
-                                       score, explanation, threshold,
+                        report_anomaly(cycle, pid, cycle_syscalls,
+                                       score, explanation,
                                        send_queue, send_lock)
 
             if proc.poll() is not None:
@@ -456,13 +549,13 @@ def monitor(pid: str, cmd_to_run: str, detector, threshold: float,
                 scored_cycles += 1
                 is_anom, score, explanation = detector.predict(cycle_syscalls)
                 score_str = f"{score:.4f}" if score < 999 else "∞"
-                flag      = "⚠ ANOMALY" if is_anom else "✓ normal"
+                flag = "ANOMALY" if is_anom else "✓  normal"
                 print(f"\n  [Final cycle] {len(cycle_syscalls)} syscalls | "
                       f"score={score_str} | {flag}")
                 if is_anom:
                     total_anomalies += 1
-                    report_anomaly(scored_cycles, pid, cycle_syscalls,
-                                   score, explanation, threshold,
+                    report_anomaly(cycle, pid, cycle_syscalls,
+                                   score, explanation,
                                    send_queue, send_lock)
 
     finally:
