@@ -39,6 +39,8 @@ function App() {
 
     onWelcome: useCallback((msg) => {
       setWelcomeInfo(msg);
+      setSyscalls([]);
+      setAnomalies([]);
     }, []),
   };
 
